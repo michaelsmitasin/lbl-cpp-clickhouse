@@ -1,4 +1,7 @@
 #! /bin/sh
+# 2019-01-08: Michael Smitasin
+# Example usage:
+# isc-dhcp_syslog_ackonly_ingest.sh dhcpd-2018-11-13.gz | clickhouse-client --query="INSERT INTO isc-dhcp_syslog_ackonly FORMAT CSV"
 
 # return only DHCPACK log messages
 zfgrep DHCPACK $1 | \
