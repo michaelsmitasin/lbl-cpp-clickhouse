@@ -1,0 +1,19 @@
+CREATE TABLE nfdump_cooked_flows (
+ date Date,
+ time DateTime,
+ duration Float32,
+ ip_proto UInt8,
+ srcip String,
+ srcport UInt16,
+ dstip String,
+ dstport UInt16,
+ flags String,
+ tos UInt8,
+ packets UInt64,
+ bytes UInt64,
+ pps UInt32,
+ bps UInt32,
+ Bpp UInt16,
+ flows UInt16
+) 
+ENGINE = MergeTree(date, (date, time, srcip, dstip), 8192);
