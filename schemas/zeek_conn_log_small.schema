@@ -1,0 +1,7 @@
+CREATE TABLE zeek_conn_log_small
+(
+    day Date, 
+    orig_h String, 
+    resp_h String
+)
+ENGINE = MergeTree(day, (day, orig_h, resp_h), 8192)
