@@ -1,0 +1,9 @@
+CREATE TABLE isc-dhcp_syslog_ackonly (
+ date Date,
+ time DateTime,
+ dhcpserver String,
+ clientip String,
+ clientmac String,
+ clienthostname String
+) 
+ENGINE = MergeTree(date, (date, time), 8192);
