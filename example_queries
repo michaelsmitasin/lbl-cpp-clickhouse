@@ -9,3 +9,12 @@ clickhouse-client --query="SELECT srcip, srcport FROM nfdump_cooked_flows WHERE 
 
 # nfdump_cooked_flows: total bytes per source IP ordered by bytes descending
 clickhouse-client --query="SELECT srcip, sum(bytes) AS sbytes FROM nfdump_cooked_flows  GROUP BY srcip, sbytes ORDER BY sbytes DESC"
+
+# isc-dhcp_syslog_ackonly: time, ip and mac or client by hostname
+clickhouse-client --query="SELECT time, clientip, clientmac FROM isc-dhcp_syslog_ackonly WHERE clienthostname='horace'"
+
+# isc-dhcp_syslog_ackonly: all results where client IP has specific first 3 octets
+clickhouse-client --query="SELECT time, clientip, clientmac, clienthostname FROM isc-dhcp_syslog_ackonly WHERE clientip like '%192.0.2.%'"
+
+# isc-dhcp_syslog_ackonly: unique MAC addresses where client IP has specific first 3 octets and DDNS hostname like "siegmeyer"
+clickhouse-client --query="SELECT DISTINCT clientmac FROM isc-dhcp_syslog_ackonly WHERE clientip like '%192.0.2.%' AND lower(clienthostname) like lower('%SIEGMEYER%')"
