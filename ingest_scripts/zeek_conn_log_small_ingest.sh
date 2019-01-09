@@ -1,6 +1,6 @@
 #! /bin/sh
 # Example usage:
-# zeek_conn_log_small_ingest.sh conn.log | clickhouse-client --query="INSERT INTO zeek_conn_log_small FORMAT TabSeparated"
+# zeek_conn_log_small_ingest.sh zeek_conn_log_small.data | clickhouse-client --query="INSERT INTO zeek_conn_log_small FORMAT TabSeparated"
 
 # excluse comments / headers
 zfgrep -v "#" $1 | \
