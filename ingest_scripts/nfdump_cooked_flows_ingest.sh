@@ -1,4 +1,9 @@
 #! /bin/sh
+# 2019-01-08: Michael Smitasin
+# assumes nfdump flags like:
+# nfdump -N -r nfcapd.201901081100 -q -o extended >> netflow-logs.gz
+# Example usage:
+# nfdump_cooked_flows_ingest.sh netflow-logs.gz | clickhouse-client --query="INSERT INTO nfdump_cooked_flows FORMAT CSV"
 
 # Convert date/time to epoch seconds using gawk mktime, then format for ingestion to clickhouse
 zcat $1 | \
