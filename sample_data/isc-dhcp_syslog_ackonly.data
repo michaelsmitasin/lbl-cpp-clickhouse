@@ -1,0 +1,5 @@
+Nov 13 00:00:00 dhcp.example.com/192.0.2.1 dhcpd: DHCPACK on 192.0.2.244 to 00:53:00:a7:cd:98 (trill-ubuntu) via igb0
+Nov 13 08:00:00 dhcp.example.com/192.0.2.1 dhcpd[5981]: DHCPACK on 192.0.2.204 to 00:53:00:12:74:8c (DESKTOP-591294) via enp3s0.382
+Nov 13 00:00:00 dhcp.example.com/192.0.2.1 dhcpd: DHCPACK on 192.0.2.174 to 00:53:00:9b:1d:f2 (Lautrec-J42) via igb0
+Nov 13 00:00:00 dhcp.example.com/192.0.2.1 dhcpd: DHCPACK on 192.0.2.185 to 00:53:00:bc:05:3b (Lorian-iMac) via igb0
+Nov 13 00:00:00 dhcp.example.com/192.0.2.1 dhcpd: DHCPACK on 192.0.2.23 to 00:53:00:bd:aa:1d (ONS_Log_8) via igb0
