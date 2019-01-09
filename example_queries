@@ -1,0 +1,5 @@
+# zeek_conn_log_small: Occurrences per day of a specific IP address
+clickhouse-client --query="select day, orig_h, resp_h, count(orig_h, resp_h) AS counth from zeek_conn_log_small where (orig_h='192.0.2.27' OR resp_h='192.0.2.27') GROUP BY day, orig_h, resp_h ORDER BY counth DESC"
+
+# zeek_conn_log_small: Occurrences per day of the first two octets
+clickhouse-client --query="select day, orig_h, resp_h, count(orig_h, resp_h) AS counth from zeek_conn_log_small where (orig_h like '192.0.%' OR resp_h like '192.0.%') GROUP BY day, orig_h, resp_h ORDER BY counth DESC"
