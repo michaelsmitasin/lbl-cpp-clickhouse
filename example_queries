@@ -3,3 +3,9 @@ clickhouse-client --query="select day, orig_h, resp_h, count(orig_h, resp_h) AS 
 
 # zeek_conn_log_small: Occurrences per day of the first two octets
 clickhouse-client --query="select day, orig_h, resp_h, count(orig_h, resp_h) AS counth from zeek_conn_log_small where (orig_h like '192.0.%' OR resp_h like '192.0.%') GROUP BY day, orig_h, resp_h ORDER BY counth DESC"
+
+# nfdump_cooked_flows: source IP and source port where source port is greater than 443, sorted by source port descending
+clickhouse-client --query="SELECT srcip, srcport FROM nfdump_cooked_flows WHERE srcport>"443" ORDER BY srcport DESC"
+
+# nfdump_cooked_flows: total bytes per source IP ordered by bytes descending
+clickhouse-client --query="SELECT srcip, sum(bytes) AS sbytes FROM nfdump_cooked_flows  GROUP BY srcip, sbytes ORDER BY sbytes DESC"
