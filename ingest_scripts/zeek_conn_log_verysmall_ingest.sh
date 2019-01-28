@@ -1,4 +1,5 @@
 #! /bin/sh
+# This combines orig_h and resp_h to a single column, ip, for faster indexing
 # Example usage:
 # zeek_conn_log_verysmall_ingest.sh zeek_conn_log_verysmall.data | clickhouse-client --query="INSERT INTO zeek_conn_log_verysmall FORMAT TabSeparated"
 
