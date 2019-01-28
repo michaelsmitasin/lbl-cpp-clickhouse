@@ -1,3 +1,9 @@
+# zeek_conn_log_verysmall: return dates when a specific IP address was hit
+clickhouse-client --query="select distinct day, ip from zeek_conn_log_verysmall where ip='192.0.2.57' GROUP BY day, ip ORDER BY day DESC"
+
+# zeek_conn_log_verysmall: return dates when the first 3 octets of an address were hit
+clickhouse-client --query="select distinct day, ip from zeek_conn_log_verysmall where ip like '192.0.2.%' GROUP BY day, ip ORDER BY day DESC"
+
 # zeek_conn_log_small: Occurrences per day of a specific IP address
 clickhouse-client --query="select day, orig_h, resp_h, count(orig_h, resp_h) AS counth from zeek_conn_log_small where (orig_h='192.0.2.27' OR resp_h='192.0.2.27') GROUP BY day, orig_h, resp_h ORDER BY counth DESC"
 
