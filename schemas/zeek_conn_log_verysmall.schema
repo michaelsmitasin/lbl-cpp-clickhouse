@@ -1,0 +1,9 @@
+CREATE TABLE zeek_conn_log_verysmall
+(
+        day Date,
+        ip String
+) 
+ENGINE MergeTree()
+PARTITION BY toYYYYMMDD(day) 
+ORDER BY (day, ip) 
+SETTINGS index_granularity=8192
