@@ -13,4 +13,4 @@ IP addresses in these examples must follow RFC 5737, Section 3 allocations for d
 
 MAC addresses in these examples must follow RFC 7042, Section 2.1.1 allocations for documentation.
 
-Domain names in these examples must follow RFC 2606, Section 3 Reserved Example Second Level Domain Names
+Domain names in these examples must follow RFC 2606, Section 3 Reserved Example Second Level Domain Names.
