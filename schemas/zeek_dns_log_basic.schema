@@ -1,0 +1,32 @@
+CREATE TABLE zeek_dns_log_basic
+(
+        day Date,
+        ts String,
+        uid String,
+        orig_h String, 
+        orig_p UInt16,
+        resp_h String,
+        resp_p UInt16,
+        proto Enum8('icmp'=1, 'tcp'=6, 'udp'=17),
+        trans_id UInt16,
+        rtt String,
+        query String,
+        qclass String,
+        qclass_name String,
+        qtype String,
+        qtype_name String,
+        rcode String,
+        rcode_name String,
+        AA Enum8('F'=0, 'T'=1),
+        TC Enum8('F'=0, 'T'=1),
+        RD Enum8('F'=0, 'T'=1),
+        RA Enum8('F'=0, 'T'=1),
+        Z UInt8,
+        answers String,
+        TTLs String,
+        rejected Enum8('F'=0, 'T'=1)
+) 
+ENGINE MergeTree()
+PARTITION BY toYYYYMMDD(day) 
+ORDER BY (day, orig_h, resp_h) 
+SETTINGS index_granularity=8192
