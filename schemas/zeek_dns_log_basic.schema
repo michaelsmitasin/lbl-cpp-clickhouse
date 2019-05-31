@@ -28,5 +28,5 @@ CREATE TABLE zeek_dns_log_basic
 ) 
 ENGINE MergeTree()
 PARTITION BY toYYYYMMDD(day) 
-ORDER BY (day, orig_h, resp_h) 
+ORDER BY (day, query, answers) 
 SETTINGS index_granularity=8192
