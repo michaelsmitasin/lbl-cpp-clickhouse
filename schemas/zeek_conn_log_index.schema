@@ -1,0 +1,10 @@
+CREATE TABLE zeek_conn_log_index
+(
+        day Date,
+        ip String,
+        uid String
+) 
+ENGINE MergeTree()
+PARTITION BY toYYYYMMDD(day) 
+ORDER BY (day, ip, uid) 
+SETTINGS index_granularity=8192
