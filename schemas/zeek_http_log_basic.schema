@@ -1,0 +1,39 @@
+CREATE TABLE zeek_http_log_basic
+(
+        day Date,
+        ts String,
+        uid String,
+        orig_h String, 
+        orig_p UInt16,
+        resp_h String,
+        resp_p UInt16,
+        trans_depth UInt16,
+        method String,
+        host String,
+        uri String,
+        referrer Nullable(String),
+        version String,
+        user_agent String,
+        request_body_len UInt32,
+        response_body_len UInt32,
+        status_code String,
+        status_msg String,
+        info_code String,
+        info_msg Nullable(String),
+        tags String,
+        username Nullable(String),
+        password Nullable(String),
+        proxied Nullable(String),
+        orig_fuids Nullable(String),
+        orig_filenames Nullable(String),
+        orig_mime_types Nullable(String),
+        resp_fuids Nullable(String),
+        resp_filenames  Nullable(String),
+        resp_mime_types Nullable(String),
+        client_header_names String,
+        server_header_names String
+) 
+ENGINE MergeTree()
+PARTITION BY toYYYYMMDD(day) 
+ORDER BY (day, host, uri) 
+SETTINGS index_granularity=8192
