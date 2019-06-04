@@ -1,0 +1,35 @@
+CREATE TABLE zeek_smtp_log_basic
+(
+        day Date,
+        ts String,
+        uid String,
+        orig_h String, 
+        orig_p UInt16,
+        resp_h String,
+        resp_p UInt16,
+        trans_depth UInt16,
+        helo Nullable(String),
+        mailfrom String,
+        rcptto String,
+        date Nullable(String),
+        from Nullable(String),
+        to Nullable(String),
+        cc Nullable(String),
+        reply_to Nullable(String),
+        msg_id String,
+        in_reply_to Nullable(String),
+        subject Nullable(String),
+        x_originating_ip Nullable(String),
+        first_received Nullable(String),
+        second_received Nullable(String),
+        last_reply Nullable(String),
+        path Nullable(String),
+        user_agent String,
+        tls Enum8('F'=0, 'T'=1, '-'=2),
+        fuids String,
+        is_webmail Enum8('F'=0, 'T'=1, '-'=2)
+) 
+ENGINE MergeTree()
+PARTITION BY toYYYYMMDD(day) 
+ORDER BY (day, mailfrom, rcptto) 
+SETTINGS index_granularity=8192
