@@ -1,0 +1,16 @@
+CREATE TABLE zeek_conn_log_optimized
+(
+        day Date,
+        ip String,
+        file_src String,
+        orig_h String, 
+        orig_p UInt16,
+        resp_h String,
+        resp_p UInt16,
+        proto Enum8('icmp'=1, 'tcp'=6, 'udp'=17),
+        conn_state Enum8('OTH'=0, 'REJ'=1, 'RSTO'=2, 'RSTOS0'=3, 'RSTR'=4, 'RSTRH'=5, 'S0'=6, 'S1'=7, 'S2'=8, 'S3'=9, 'SF'=10, 'SH'=11, 'SHR'=12)
+) 
+ENGINE MergeTree()
+PARTITION BY toYYYYMMDD(day) 
+ORDER BY (day, ip) 
+SETTINGS index_granularity=8192
