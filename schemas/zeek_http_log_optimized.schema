@@ -1,0 +1,20 @@
+CREATE TABLE zeek_http_log_optimized
+(
+        day Date,
+        ts String,
+        orig_h String, 
+        orig_p UInt16,
+        resp_h String,
+        resp_p UInt16,
+        method String,
+        host String,
+        uri String,
+        referrer Nullable(String),
+        user_agent String,
+        status_code String,
+        status_msg String
+) 
+ENGINE MergeTree()
+PARTITION BY toYYYYMMDD(day) 
+ORDER BY (day, host, uri) 
+SETTINGS index_granularity=8192
