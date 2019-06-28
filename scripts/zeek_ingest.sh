@@ -3,10 +3,10 @@
 # Ingest script for Zeek logs into Clickhouse.
 #
 # MNSmitasin@lbl.gov 2019-06-16
-# zeek_build_candidates.sh | xargs -n1 -I% zeek_ingest.sh %
-# cat 10day | xargs -n1 -I% zeek_ingest.sh %
-# ADD: -m to verify metadata (filename, path, etc)
-# ADD: -v to verify data added to stream (date, file_src)
+# Example:
+# zeek_ingest.sh conn.log -m            verify metadata (filename, path, etc)
+# zeek_ingest.sh conn.log -v            verify data added to stream (date, file_src)
+# zeek_ingest.sh conn.log | clickhouse-client --query="INSERT INTO zeek-conn FORMAT TabSeparated"
 #
 ###############################################################################
 ### LOCAL VARIABLES
