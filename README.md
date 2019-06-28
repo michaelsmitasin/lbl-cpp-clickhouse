@@ -1,9 +1,9 @@
 # lbl-cpp-clickhouse
 Public things related to LBL CPP's Clickhouse instance
 
-schemas - These are schemas that can be imported to Clickhouse for various types of logs. Example import: clickhouse-client --query="$(cat zeek_conn_log_full_nonoptimized.schema | tr -d "\n")"
+schemas - These are schemas that can be imported to Clickhouse for various types of logs. Example import: clickhouse-client --query="$(cat zeek_conn.schema | tr -d "\n")"
 
-ingest_scripts - These are scripts that can be used to re-format data to ingest them into schemas
+scripts - These are scripts that can be used to re-format data to ingest them into schemas
 
 sample_data - Sample data that should be importable with the schema and ingest_scripts provided
 
