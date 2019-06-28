@@ -1,0 +1,32 @@
+CREATE TABLE zeek_files
+(
+        day Date,
+        file_src String,
+        ts String,
+        fuid String,
+        tx_hosts String,
+        rx_hosts String,
+        conn_uids String,
+        source String,
+        depth UInt8,
+        analyzers String,
+        mime_type String,
+        filename Nullable(String),
+        duration Float32,
+        local_orig Enum8('F'=0, 'T'=1),
+        is_orig Enum8('F'=0, 'T'=1),
+        seen_bytes String,
+        total_bytes String,
+        missing_bytes String,
+        overflow_bytes String,
+        timedout Enum8('F'=0, 'T'=1),
+        parent_fuid Nullable(String),
+        md5 String,
+        sha1 String,
+        sha256 Nullable(String),
+        extracted Nullable(String)
+) 
+ENGINE MergeTree()
+PARTITION BY toYYYYMMDD(day) 
+ORDER BY (day, md5) 
+SETTINGS index_granularity=8192
