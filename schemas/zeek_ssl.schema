@@ -1,0 +1,30 @@
+CREATE TABLE zeek_ssl
+(
+        day Date,
+        file_src String,
+        ts String,
+        uid String,
+        orig_h String, 
+        orig_p UInt16,
+        resp_h String,
+        resp_p UInt16,
+        version Enum8(''=0, 'DTLSv12'=1, 'DTLSv10'=2, 'TLSv13-draft18'=3, 'TLSv12'=4, 'TLSv10'=5, 'TLSv11'=6, 'SSLv3'=7, 'SSLv2'=8, 'TLSv13-draft23'=9, '-'=10),
+        cipher String,
+        curve String,
+        server_name String,
+        resumed Enum8('T'=0, 'F'=1),
+        last_alert String,
+        next_protocol String,
+        established Enum8('T'=0, 'F'=1),
+        cert_chain_fuids String,
+        client_cert_chain_fuids String,
+        subject String,
+        issuer String,
+        client_subject String,
+        client_issuer String,
+        validation_status Enum8(''=0, 'self signed certificate'=1, 'self signed certificate in certificate chain'=2, 'permitted subtree violation'=3, 'unable to get local issuer certificate'=4, 'certificate has expired'=5, 'ok'=6, 'certificate signature failure'=7, '-'=8)
+) 
+ENGINE MergeTree()
+PARTITION BY toYYYYMMDD(day) 
+ORDER BY (day, server_name) 
+SETTINGS index_granularity=8192
