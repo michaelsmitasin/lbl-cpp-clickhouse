@@ -1,21 +1,23 @@
 CREATE TABLE zeek_http
 (
-        day Date,
-        file_src String,
         ts String,
         uid String,
         orig_h String, 
         orig_p UInt16,
         resp_h String,
         resp_p UInt16,
+        trans_depth UInt16,
         method String,
         host String,
         uri String,
         referrer Nullable(String),
+        version String,
         user_agent Nullable(String),
-        status_code Nullable(String)
+        status_code Nullable(String),
+        file_src String,
+        day Date MATERIALIZED toDate(toDateTime(round(toFloat64(ts)), 'America/Los_Angeles'))
 ) 
 ENGINE MergeTree()
 PARTITION BY toYYYYMMDD(day) 
-ORDER BY (day, host, uri) 
+ORDER BY (ts, sipHash64(host, uri)) 
 SETTINGS index_granularity=8192
