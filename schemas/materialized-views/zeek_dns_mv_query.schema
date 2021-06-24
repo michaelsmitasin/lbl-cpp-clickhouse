@@ -1,0 +1,8 @@
+CREATE MATERIALIZED VIEW zeek_dns_mv_query 
+  ENGINE SummingMergeTree() 
+  PARTITION BY toYYYYMMDD(day)
+  ORDER BY (day, query) 
+  AS 
+    SELECT day, query, count(day) as query_counts 
+    FROM zeek_dns 
+    GROUP BY (day, query)
