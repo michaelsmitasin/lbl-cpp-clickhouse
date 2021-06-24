@@ -1,0 +1,521 @@
+#! /bin/sh
+###############################################################################
+### Wrapper for SQL queries to clickhouse database of Zeek logs
+### 2020-07-30 mnsmitasin@lbl.gov
+#
+# CHANGES (2020-07-30):
+# 1) Split raw-table search functionality to ioc-drill and moved MV search functionality to ioc-search
+#
+# KNOWN ISSUES (2020-07-27):
+# 1) IPv6 addresses are handled literally, there is no attempt to pad or abbreviate, or interpret the address differently
+# 2) Unsorted columns search quite slow compared to sorted columns. Whenever possible, try to include a sorted column in your search
+#    as this will reduce the data set that's searched on.
+# 3) No support for multiple queries in a single command.
+# 4) The -b "bar" option will overlay output rows on top of each other, usually if -c is specified after it
+# 5) The -V and -X options may output duplicate columns if you specify search criteria because it builds the columns to output from those
+# 6) Only tested on FreeBSD, may not work on Linux due to different handling of 'date' options, possibly other issues
+#    number of SF rows, you'll get twice as many as really occurred. This is because the ingest process dups rows in order to sort
+#    by EITHER orig_h or resp_h.
+# 7) File searches that lack IP IOCs will give a harmless error due to it attempting secondary searches on non-existent IP result files.
+#
+###############################################################################
+### LOCAL VARIABLES
+
+# XXX Disable for prod
+DEBUG="T"
+DEBUGLOG="CLICKHOUSE-QUERY-debug.log"
+
+# Contact
+MAILTO="admin@example.com"
+
+CLICKHOUSE_SERVER="clickhouse.example.com"
+CHKEY="CLICKHOUSE-feeds.key"
+
+# PROD PATH
+IOCDRILLPATH="/usr/local/bin"
+
+# default values
+FLAVOR="conn"
+EXCLUSIVEBIT=""
+LOOKBACK="90"
+TARGET=""
+PREWHERE=""
+TRANSLATEDRESULTS=""
+SEARCHMODE="="
+ORSEARCHTERMS=""
+ANDSEARCHTERMS=""
+RESULTS="day"
+GROUPBY="group by $RESULTS"
+ORDERBY="day"
+MAXMEM="10000000000"
+CASEINSENSITIVE=""
+NOOPBIT="0"
+
+STARTDATE=$(date -j -v-"$LOOKBACK"d +"%Y-%m-%d")
+
+###############################################################################
+### FUNCTIONS
+
+USAGE(){
+echo ""
+echo "Usage:"
+echo "  -d [days to look back]  number of days back to search (default: $LOOKBACK)"
+echo "  -f [filename]           file containing IOCs to search"
+echo "  -l                      loose search all options after this (unless prohibited), wildcard char is %"
+echo "  -c                      count occurrences"
+echo "  -b [max value]          EXPERIMENTAL: draw a bar graph of counted occurrences, scaled to [max value]"
+echo "                          (Known issue: if -b precedes -c, may cause output rows to be merged together)"
+echo "  -X                      Show extra results (more columns, specific per table)"
+echo "  -V                      Verbose mode; select all columns. Can be VERY slow!"
+echo "  -Z                      Include the name of the Zeek cluster where the given record was found"
+echo "  -Q                      Custom query, write whatever SQL-like query you want"
+echo "  -M [memory]             Max memory per query in GB"
+echo "  -n                      noop; show SQL query and exit"
+echo ""
+echo "Table-dependent options (table is set automatically based on option):"
+echo "Zeek conn.log"
+echo "  -i [ip_address]         same as 'orig_h OR resp_h' (added together)"
+echo "  -O [orig_ip_address]"
+echo "  -R [resp_ip_address]"
+echo "  -D [dst_port]           unsorted (slow unless paired with sorted column)"
+echo "  -S [src_port]           unsorted (slow unless paired with sorted column)"
+echo "  -P [proto]              unsorted (slow unless paired with sorted column)"
+echo "  -C [conn_state]         unsorted (slow unless paired with sorted column)"
+echo ""
+echo "Zeek http.log"
+echo "  -h [host]"
+echo "  -u [URI]                unsorted (slow unless paired with sorted column)"
+echo ""
+echo "Zeek dns.log"
+echo "  -q [query]"
+echo "  -a [answers]            i.e. reverse lookup of the query, unsorted (slow unless paired with sorted column)"
+echo ""
+echo "Zeek ssl.log"
+echo "  -s [server_name]"
+echo ""
+echo "Zeek files.log"
+echo "  -m [md5_hash]"
+echo "  -1 [sha1_hash]          unsorted (slow unless paired with sorted column)"
+echo ""
+echo "Zeek smtp.log"
+echo "  -F [mailfrom]"
+echo "  -T [rcptto]             unsorted (slow unless paired with sorted column)"
+echo ""
+echo "Basic Examples:"
+echo "  ${0##*/} -i 192.0.2.45                          conn.logs for IP as either orig_h or resp_h"
+echo "  ${0##*/} -h example.com                         http.logs for hostname"
+echo "  ${0##*/} -s example.com                         ssl.logs for server_name"
+echo "  ${0##*/} -m 91db4e37d71fd51b5dd1x64836602440            files.logs for md5 hash"
+echo "  ${0##*/} -q example.com                         dns.logs for DNS query question"
+echo "  ${0##*/} -F admin@example.com                           smtp.logs for sender email address"
+echo ""
+echo "Advanced Examples:"
+echo "  ${0##*/} -l -i 192.0.2.% -P tcp -D 53                           conn.logs for 1st 3 octets of IP matching proto=tcp and dstport=53"
+echo "  ${0##*/} -X -i 192.0.2.232 -d 30                                conn.logs for exact IP with extra columns, 30 days"
+echo "  ${0##*/} -l -u %bitcoin% -d 10                          http.logs for URI containing string, 10 days"
+echo "  ${0##*/} -F admin@example.com -l -T %@example.com           smtp.logs from specific sender, and to whole domain"
+echo "  ${0##*/} -Q \"SELECT count(day) FROM zeek_conn\"        custom query counting all rows in a table"
+echo ""
+echo "This is the slower, in-depth tool. If you need speed but simple queries, see ioc-search."
+echo "You can chain criteria for more specific results, i.e. you can drill down. See the Advanced Examples."
+echo ""
+exit 1
+}
+
+# check that some option is defined
+if [ -z "$(echo $1 | grep "^-")" ]
+then
+  echo "Error: No options set."
+  USAGE
+
+fi
+
+CHECKEXCLUSIVEBIT(){
+  if [ -z "$EXCLUSIVEBIT" ]
+  then
+    EXCLUSIVEBIT="1"
+  else
+    echo "Error: cannot run multiple queries at once."
+    exit 1
+  fi
+}
+
+BUILDTABLE(){
+  case $FLAVOR in
+    conn) TABLE="zeek_conn" ;;
+    http) TABLE="zeek_http" ;;
+    dns) TABLE="zeek_dns" ;;
+    files) TABLE="zeek_files" ;;
+    ssl) TABLE="zeek_ssl" ;;
+    smtp) TABLE="zeek_smtp" ;;
+    *) echo "Error: $FLAVOR cannot be mapped to pre-defined table name" ;;
+  esac
+}
+
+ADDTERMS(){
+  if [ -z "$CASEINSENSITIVE" ]
+  then
+        ANDSEARCHTERMS="$ANDSEARCHTERMS AND $TERM $SEARCHMODE '$OPTARG'"
+  else
+        ANDSEARCHTERMS="$ANDSEARCHTERMS AND lower($TERM) $SEARCHMODE lower('$OPTARG')"
+  fi
+  RESULTS="$RESULTS, $TERM"
+  GROUPBY="group by $RESULTS"
+}
+
+PREWHERE(){
+  if [ -z "$PREWHERE" ]
+  then
+    PREWHERE="PREWHERE $1 $SEARCHMODE '$OPTARG'"
+  else
+    PREWHERE="$PREWHERE OR $1 $SEARCHMODE '$OPTARG'"
+  fi
+}
+
+# XXX this is a hack for UInt16 not liking single quotes or LIKE searches
+ADDHARDTERMS(){
+  ANDSEARCHTERMS="$ANDSEARCHTERMS AND $TERM = $OPTARG"
+  RESULTS="$RESULTS, $TERM"
+  GROUPBY="GROUP BY $RESULTS"
+}
+
+# XXX this is a hack for Enums not liking LIKE but wanting single quotes
+ADDHARDTERMS2(){
+  ANDSEARCHTERMS="$ANDSEARCHTERMS AND $TERM = '$OPTARG'"
+  RESULTS="$RESULTS, $TERM"
+  GROUPBY="GROUP BY $RESULTS"
+}
+
+
+BUILDEXTRACOLUMNS(){
+  if [ -z "$EXTRABIT" ]
+  then
+    :
+  else
+    case $FLAVOR in
+      conn) EXTRACOLUMNS="orig_h, resp_h, resp_p, proto, conn_state";;
+      http) EXTRACOLUMNS="orig_h, orig_p, method, host, uri, status_code";;
+      dns) EXTRACOLUMNS="orig_h, resp_h, query, qtype_name, answers";;
+      ssl) EXTRACOLUMNS="orig_h, resp_h, server_name";;
+      files) EXTRACOLUMNS="tx_hosts, rx_hosts, mime_type, filename";;
+      smtp) EXTRACOLUMNS="mailfrom, rcptto, subject";;
+    esac
+    RESULTS=$(echo "day, $EXTRACOLUMNS, count()" | sed 's/, $//g'); GROUPBY="group by day, $(echo $EXTRACOLUMNS | sed 's/,$//g')";
+  fi
+}
+
+BUILDSQL(){
+    BUILDEXTRACOLUMNS
+    BUILDTABLE
+    SQLQUERY="SELECT $RESULTS FROM $TABLE "$PREWHERE" WHERE ( day>='"$STARTDATE"' $ORSEARCHTERMS $ANDSEARCHTERMS ) $GROUPBY ORDER BY $ORDERBY ASC"
+}
+
+SEARCH(){
+  # XXX uncomment this for prod
+  ssh -i $CHKEY -l feeds $CLICKHOUSE_SERVER "clickhouse-client --joined_subquery_requires_alias=0 --query=\"$SQLQUERY\" --max_memory_usage=$MAXMEM" "$TRANSLATERESULTS"
+  if [ "$DEBUG" = "F" ]
+  then
+    :
+  elif [ "$DEBUG" = "T" ]
+  then
+    #echo "# DEBUG: logging enabled to $DEBUGLOG" >&2
+    echo "$(date -j +%s),$USER,${0##*/},\"$SQLQUERY\"" >> $DEBUGLOG
+  else
+    echo "Error in \$DEBUG value, exiting."
+    exit 1
+  fi
+}
+
+###############################################################################
+### FILE SEARCH FUNCTIONS
+
+REMOVECOMMENTS(){
+        grep -v "^#" "$INPUTFILE"
+}
+
+BUILDTEMPTABLES(){
+        THISTABLEPREFIX="tempsearchtable_$(date -j +%s)"
+        $IOCDRILLPATH/ioc-drill -Q "CREATE TABLE $THISTABLEPREFIX (ioc String, type String) ENGINE MergeTree() ORDER BY (ioc) SETTINGS index_granularity=8192"
+}
+
+FILETOSQL(){
+        mkdir -p $WORKINGDIR/SQL/
+        BUILDTEMPTABLES
+        for TEMPFILE in $(find $WORKINGDIR -name "temp.*" -type f);
+        do
+                case $(basename $TEMPFILE) in
+                        temp.ipv4) TYPE="ip"; TABLENAME="zeek_conn";;
+                        temp.ipv6) TYPE="ip"; TABLENAME="zeek_conn";;
+                        temp.uri) TYPE="uri"; TABLENAME="zeek_http";;
+                        temp.email) TYPE="email"; TABLENAME="zeek_smtp";;
+                        temp.md5) TYPE="md5"; TABLENAME="zeek_files";;
+                        temp.sha1) TYPE="sha1"; TABLENAME="zeek_files";;
+                        temp.domain) TYPE="domain"; TABLENAME="zeek_dns";;
+                esac
+                ssh -i $CHKEY -l feeds $CLICKHOUSE_SERVER "cat $TEMPFILE | sed 's/$/,$TYPE/g' | clickhouse-client --query=\"INSERT into $THISTABLEPREFIX FORMAT CSV\""
+        done
+        BUILDQUERY(){
+        # Do 1 query per day
+        WORKBACK="$LOOKBACK"
+        while [ $WORKBACK -ge "1" ]
+        do
+                WORKINGDATE=$(date -j -v-"$WORKBACK"d +"%Y-%m-%d")
+                echo "SELECT $RESULTS FROM $TABLENAME PREWHERE day = '$WORKINGDATE' WHERE $SEARCHTERM IN (SELECT ioc FROM $THISTABLEPREFIX WHERE type = '$TYPE') ORDER BY ts ASC;" >> $WORKINGDIR/SQL/$TABLENAME-$WORKINGDATE
+                WORKBACK="$(echo "$WORKBACK" - 1 | bc)"
+        done
+        }
+        # IP searches
+        if [ -z "$(cat $WORKINGDIR/temp.ipv4 && cat $WORKINGDIR/temp.ipv6)" ]
+        then
+                :
+        else
+                SEARCHTERM="orig_h"; TYPE="ip"; TABLENAME="zeek_conn"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, proto, service, conn_state"; BUILDQUERY;
+                SEARCHTERM="resp_h"; TYPE="ip"; TABLENAME="zeek_conn"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, proto, service, conn_state"; BUILDQUERY;
+        fi
+        # URI searches
+        if [ -z "$(cat $WORKINGDIR/temp.uri)" ]
+        then
+                :
+        else
+                SEARCHTERM="uri"; TYPE="uri"; TABLENAME="zeek_http"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, method, host, uri, status_code"; BUILDQUERY;
+        fi
+        # Email searches
+        if [ -z "$(cat $WORKINGDIR/temp.email)" ]
+        then
+                :
+        else
+                SEARCHTERM="mailfrom"; TYPE="email"; TABLENAME="zeek_smtp"; RESULTS="ts, orig_h, resp_h, mailfrom, rcptto, subject"; BUILDQUERY;
+                SEARCHTERM="rcptto"; TYPE="email"; TABLENAME="zeek_smtp"; RESULTS="ts, orig_h, resp_h, mailfrom, rcptto, subject"; BUILDQUERY;
+        fi
+        # md5 searches
+        if [ -z "$(cat $WORKINGDIR/temp.md5)" ]
+        then
+                :
+        else
+                SEARCHTERM="md5"; TYPE="md5"; TABLENAME="zeek_files"; RESULTS="ts, tx_hosts, rx_hosts, filename, mime_type, md5"; BUILDQUERY;
+        fi
+        # sha1 searches
+        if [ -z "$(cat $WORKINGDIR/temp.sha1)" ]
+        then
+                :
+        else
+                SEARCHTERM="sha1"; TYPE="sha1"; TABLENAME="zeek_files"; RESULTS="ts, tx_hosts, rx_hosts, filename, mime_type, sha1"; BUILDQUERY;
+        fi
+        # DNS searches
+        if [ -z "$(cat $WORKINGDIR/temp.domain)" ]
+        then
+                :
+        else
+                SEARCHTERM="query"; TYPE="domain"; TABLENAME="zeek_dns"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, proto, query, qtype_name, answers"; BUILDQUERY;
+                SEARCHTERM="host"; TYPE="domain"; TABLENAME="zeek_http"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, method, host, uri, status_code"; BUILDQUERY;
+                SEARCHTERM="server_name"; TYPE="domain"; TABLENAME="zeek_ssl"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, subject"; BUILDQUERY;
+        fi
+}
+
+PARSE() {
+        # remove comments
+        NOCOMMENTS=$(REMOVECOMMENTS)
+
+        IPV4=$(echo "$NOCOMMENTS" | grep "^[[:digit:]]\{1,3\}\.[[:digit:]]\{1,3\}\.[[:digit:]]\{1,3\}\.[[:digit:]]\{1,3\}$")
+        IPV6=$(echo "$NOCOMMENTS" | grep "^[[:xdigit:]]\{1,4\}\:" | tr '[:upper:]' '[:lower:]' | fgrep -v "/")
+        URI=$(echo "$NOCOMMENTS" | tr '[:upper:]' '[:lower:]' | grep "^/")
+        EMAIL=$(echo "$NOCOMMENTS" | grep "^[[:print:]]*@[[:print:]]*\.[[:print:]]*" | tr '[:upper:]' '[:lower:]' )
+        MD5HASH=$(echo "$NOCOMMENTS" | grep "^[[:alnum:]]\{32\}$" | tr '[:upper:]' '[:lower:]')
+        SHA1HASH=$(echo "$NOCOMMENTS" | grep "^[[:alnum:]]\{40\}$" | tr '[:upper:]' '[:lower:]')
+        DOMAIN=$(echo "$NOCOMMENTS" | grep "^[[:print:]]*\.[[:print:]]*$" | fgrep -v "/" | fgrep -v "@" | tr '[:upper:]' '[:lower:]')
+
+        echo "$IPV4" > "$WORKINGDIR"/temp.ipv4
+        echo "$IPV6" > "$WORKINGDIR"/temp.ipv6
+        echo "$URI" > "$WORKINGDIR"/temp.uri
+        echo "$EMAIL" > "$WORKINGDIR"/temp.email
+        echo "$MD5HASH" > "$WORKINGDIR"/temp.md5
+        echo "$SHA1HASH" > "$WORKINGDIR"/temp.sha1
+        echo "$DOMAIN" > "$WORKINGDIR"/temp.domain
+
+        OTHER=$(echo "$NOCOMMENTS" | fgrep -v -f "$WORKINGDIR"/temp.ipv4 | fgrep -v -f "$WORKINGDIR"/temp.ipv6 | fgrep -v -f "$WORKINGDIR"/temp.uri | fgrep -v -f "$WORKINGDIR"/temp.email | fgrep -v -f "$WORKINGDIR"/temp.md5 | fgrep -v -f "$WORKINGDIR"/temp.sha1 | fgrep -v -f "$WORKINGDIR"/temp.domain | grep -v "^[[:blank:]]*$")
+
+        if [ -z "$OTHER" ]
+        then
+                FILETOSQL
+                echo "Wrote queries to: $WORKINGDIR/SQL/"
+                echo ""
+        else
+                echo "ERROR: Some data was unable to be parsed into known categories. Exiting."
+                echo ""
+                echo "Unparsable data:"
+                echo "$OTHER"
+                exit 1
+        fi
+}
+
+SEARCHMULTI(){
+        echo "Running parallel SQL queries" >&2
+        # XXX still need to do something here so the output files are created with something other than feeds:feeds
+        ssh -i $CHKEY -l feeds $CLICKHOUSE_SERVER "find $WORKINGDIR/SQL/ -name \"zeek*\" | parallel -j20 --eta 'cat {} | clickhouse-client --multiquery --max_memory_usage=$MAXMEM >> $WORKINGDIR/{/}.{%}.results'"
+        echo ""
+}
+
+DROPTEMPTABLES(){
+        $IOCDRILLPATH/ioc-drill -Q "DROP TABLE $THISTABLEPREFIX"
+}
+
+SECONDARYSEARCHES(){
+        BUILD2NDQUERY(){
+        WORKBACK="$LOOKBACK"
+        while [ $WORKBACK -ge "1" ]
+        do
+                WORKINGDATE=$(date -j -v-"$WORKBACK"d +"%Y-%m-%d")
+                echo "SELECT $RESULTS FROM $TABLENAME PREWHERE day = '$WORKINGDATE' WHERE $SEARCHTERM IN (SELECT ioc FROM $THISTABLEPREFIX WHERE type = '$TYPE') ORDER BY ts ASC;" >> $WORKINGDIR/SQL/SECONDARY_$TABLENAME-$WORKINGDATE
+                WORKBACK="$(echo "$WORKBACK" - 1 | bc)"
+        done
+        }
+        # Check results for services
+        if [ -z "$(awk '{if ($7 ~ "dns") print $0}' $WORKINGDIR/zeek_conn.*.results)" ]
+        then
+                :
+        else
+                SEARCHTERM="orig_h"; TYPE="ip"; TABLENAME="zeek_dns"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, proto, query, qtype_name, answers"; BUILD2NDQUERY;
+                SEARCHTERM="resp_h"; TYPE="ip"; TABLENAME="zeek_dns"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, proto, query, qtype_name, answers"; BUILD2NDQUERY;
+        fi
+        if [ -z "$(awk '{if ($7 ~ "http") print $0}' $WORKINGDIR/zeek_conn.*.results)" ]
+        then
+                :
+        else
+                SEARCHTERM="orig_h"; TYPE="ip"; TABLENAME="zeek_http"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, method, host, uri, status_code"; BUILD2NDQUERY;
+                SEARCHTERM="resp_h"; TYPE="ip"; TABLENAME="zeek_http"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, method, host, uri, status_code"; BUILD2NDQUERY;
+        fi
+        if [ -z "$(awk '{if ($7 ~ "ssl") print $0}' $WORKINGDIR/zeek_conn.*.results)" ]
+        then
+                :
+        else
+                SEARCHTERM="orig_h"; TYPE="ip"; TABLENAME="zeek_ssl"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, subject"; BUILD2NDQUERY;
+                SEARCHTERM="resp_h"; TYPE="ip"; TABLENAME="zeek_ssl"; RESULTS="ts, orig_h, orig_p, resp_h, resp_p, subject"; BUILD2NDQUERY;
+        fi
+        if [ -z "$(awk '{if ($7 ~ "smtp") print $0}' $WORKINGDIR/zeek_conn.*.results)" ]
+        then
+                :
+        else
+                SEARCHTERM="orig_h"; TYPE="ip"; TABLENAME="zeek_smtp"; RESULTS="ts, orig_h, resp_h, mailfrom, rcptto, subject"; BUILD2NDQUERY;
+                SEARCHTERM="resp_h"; TYPE="ip"; TABLENAME="zeek_smtp"; RESULTS="ts, orig_h, resp_h, mailfrom, rcptto, subject"; BUILD2NDQUERY;
+        fi
+
+        # If there are any conn logs, do a files search 
+        if [ -z "$(cat $WORKINGDIR/zeek_conn*.results)" ]
+        then
+                :
+        else
+                SEARCHTERM="tx_hosts"; TYPE="ip"; TABLENAME="zeek_files"; RESULTS="ts, tx_hosts, rx_hosts, filename, mime_type, md5, sha1"; BUILD2NDQUERY;
+                SEARCHTERM="rx_hosts"; TYPE="ip"; TABLENAME="zeek_files"; RESULTS="ts, tx_hosts, rx_hosts, filename, mime_type, md5, sha1"; BUILD2NDQUERY;
+        fi
+
+        # Check if there are secondary queries to run
+        if [ -z "$(cat $WORKINGDIR/SQL/SECONDARY_* 2>/dev/null)" ]
+        then
+                :
+        else
+                echo "Running parallel secondary SQL queries" >&2
+                # XXX still need to do something here so the output files are created with something other than feeds:feeds
+                ssh -i $CHKEY -l feeds $CLICKHOUSE_SERVER "find $WORKINGDIR/SQL/ -name \"SECONDARY_zeek*\" | parallel -j20 --eta 'cat {} | clickhouse-client --multiquery --max_memory_usage=$MAXMEM >> $WORKINGDIR/{/}.{%}.results'"
+                echo ""
+        fi
+}
+
+FORMATOUTPUT(){
+        cat $WORKINGDIR/*zeek_conn*.results | sort -nk1 >> $WORKINGDIR/ZEEK_CONN.results
+        cat $WORKINGDIR/*zeek_dns*.results | sort -nk1 >> $WORKINGDIR/ZEEK_DNS.results
+        cat $WORKINGDIR/*zeek_files*.results | sort -nk1 >> $WORKINGDIR/ZEEK_FILES.results
+        cat $WORKINGDIR/*zeek_http*.results | sort -nk1 >> $WORKINGDIR/ZEEK_HTTP.results
+        cat $WORKINGDIR/*zeek_smtp*.results | sort -nk1 >> $WORKINGDIR/ZEEK_SMTP.results
+        cat $WORKINGDIR/*zeek_ssl*.results | sort -nk1 >> $WORKINGDIR/ZEEK_SSL.results
+}
+
+SEARCHFILE(){
+        MAXMEM="50000000000"
+        WORKINGDIR="/var/tmp/ioc-drill-$(date -j +%s)"
+        mkdir -p $WORKINGDIR
+        # Hacks to allow feeds user to write output to this dir
+        chown $USER:mt $WORKINGDIR
+        chmod 777 $WORKINGDIR
+        echo "# Parsing: $INPUTFILE" >&2
+        PARSE
+        SEARCHMULTI
+        SECONDARYSEARCHES
+        chmod 755 $WORKINGDIR
+        DROPTEMPTABLES
+        echo ""
+        echo "Search complete, sorting by timestamp, this can take a while..."
+        echo "If you don't want to wait, you can Ctrl+C this sort and just go to $WORKINGDIR"
+        echo ""
+        FORMATOUTPUT > /dev/null 2>&1 
+        echo "Total: $(cat $WORKINGDIR/ZEEK_*.results | wc -l) results:" >&2
+        find $WORKINGDIR/ -name "ZEEK_*.results" | xargs -n1 -I% wc -l % >&2
+}
+
+###############################################################################
+### EXECUTION
+
+# Check options and arguments after options which are indicated with a : and passed as OPTARG
+while getopts "t:d:f:lcb:XVZnQ:M:i:O:R:D:S:P:C:u:h:q:a:s:m:1:F:T:?" OPT; do
+  case $OPT in
+        # generic options
+   d) STARTDATE=$(date -j -v-"$OPTARG"d +"%Y-%m-%d") ;; # set lookback
+   f) INPUTFILE="$OPTARG"; SEARCHFILE; exit 0 ;;
+   l) SEARCHMODE="LIKE" ;;
+   c) RESULTS="$RESULTS, count(day)" ;;
+   b) RESULTS="$RESULTS, bar(count(day),0, $OPTARG, 20)"; TRANSLATERESULTS=" | tr \"\342\226\210\" \"-\"" ;;
+   X) EXTRABIT="1" ;;
+   V) RESULTS="*"; GROUPBY=""; ORDERBY="ts";;
+   Z) RESULTS="$RESULTS, file_src"; GROUPBY="$GROUPBY, file_src" ;;
+   n) NOOPBIT="1" ;;
+   Q) SQLQUERY="$OPTARG"; DEBUG="T"; SEARCH; exit 0;;
+   M) MAXMEM="$OPTARG"000000000"";;
+        # conn queries
+   i) FLAVOR="conn"; ORSEARCHTERMS="AND (orig_h $SEARCHMODE '$OPTARG' OR resp_h $SEARCHMODE '$OPTARG')";;
+   O) FLAVOR="conn"; TERM="orig_h"; ADDTERMS;;
+   R) FLAVOR="conn"; TERM="resp_h"; ADDTERMS;;
+   D) FLAVOR="conn"; TERM="resp_p"; ADDHARDTERMS ;;
+   S) FLAVOR="conn"; TERM="orig_p"; ADDHARDTERMS ;;
+   P) FLAVOR="conn"; TERM="proto"; ADDHARDTERMS2 ;;
+   C) FLAVOR="conn"; TERM="conn_state"; ADDHARDTERMS2 ;;
+        # http queries
+   u) FLAVOR="http"; TERM="uri"; CASEINSENSITIVE="1"; ADDTERMS ;;
+   h) FLAVOR="http"; TERM="host"; CASEINSENSITIVE="1"; ADDTERMS ;;
+        # dns queries
+   q) CHECKEXCLUSIVEBIT; FLAVOR="dns"; TERM="query"; CASEINSENSITIVE="1"; ADDTERMS ;;
+   a) CHECKEXCLUSIVEBIT; FLAVOR="dns"; TERM="answers"; CASEINSENSITIVE="1"; ADDTERMS ;;
+        # ssl queries
+   s) CHECKEXCLUSIVEBIT; FLAVOR="ssl"; TERM="server_name"; CASEINSENSITIVE="1"; ADDTERMS ;;
+        # files queries
+   m) CHECKEXCLUSIVEBIT; FLAVOR="files"; TERM="md5"; CASEINSENSITIVE="1"; ADDTERMS;;
+   1) CHECKEXCLUSIVEBIT; FLAVOR="files"; TERM="sha1"; CASEINSENSITIVE="1"; ADDTERMS ;;
+        # smtp queries
+   F) FLAVOR="smtp"; TERM="mailfrom"; CASEINSENSITIVE="1"; ADDTERMS ;;
+   T) FLAVOR="smtp"; TERM="rcptto"; CASEINSENSITIVE="1"; ADDTERMS ;;
+   ?) USAGE ;;
+  esac
+done
+
+BUILDSQL
+
+if [ "$NOOPBIT" = "1" ]
+then
+        echo "$SQLQUERY"
+        exit 0
+elif [ "$NOOPBIT" = "0" ]
+then
+        OUTPUT=$(SEARCH)
+fi
+
+if [ -z "$OUTPUT" ]
+then
+  echo "stderr: no results found" >&2
+else
+  # print headers
+  echo "# $RESULTS" | tr "," "\t" | sed 's/(day)//g'
+  echo "$OUTPUT"
+fi
+
+###############################################################################
+### CLEANUP, log, exit cleanly
+# logger "$0 - Exited cleanly"
+exit 0
