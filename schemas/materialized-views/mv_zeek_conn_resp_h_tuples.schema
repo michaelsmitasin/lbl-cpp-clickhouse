@@ -11,7 +11,8 @@ PARTITION BY (day)
 PRIMARY KEY (resp_h, orig_h, resp_p)
 ORDER BY (resp_h, orig_h, resp_p, proto, conn_state);
 
-CREATE MATERIALIZED VIEW mv_zeek_conn_resp_h_tuples TO mvt_zeek_conn_resp_h_tuples
+CREATE MATERIALIZED VIEW mv_zeek_conn_resp_h_tuples 
+TO mvt_zeek_conn_resp_h_tuples
 AS
   SELECT day, orig_h, resp_h, resp_p, proto, conn_state, count() AS conn_counts
   FROM zeek_conn 
