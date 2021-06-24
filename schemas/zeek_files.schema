@@ -1,7 +1,5 @@
 CREATE TABLE zeek_files
 (
-        day Date,
-        file_src String,
         ts String,
         fuid String,
         tx_hosts String,
@@ -24,9 +22,11 @@ CREATE TABLE zeek_files
         md5 String,
         sha1 String,
         sha256 Nullable(String),
-        extracted Nullable(String)
+        extracted Nullable(String),
+        file_src String,
+        day Date MATERIALIZED toDate(toDateTime(round(toFloat64(ts)), 'America/Los_Angeles'))
 ) 
 ENGINE MergeTree()
 PARTITION BY toYYYYMMDD(day) 
-ORDER BY (day, md5) 
+ORDER BY (ts, sipHash64(md5,sha1)) 
 SETTINGS index_granularity=8192
