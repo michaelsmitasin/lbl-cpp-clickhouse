@@ -1,8 +1,5 @@
 CREATE TABLE zeek_conn
 (
-        day Date,
-        file_src String,
-        ip String,
         ts String,
         uid String,
         orig_h String, 
@@ -26,9 +23,11 @@ CREATE TABLE zeek_conn
         tunnel_parents String,
         peer String,
         orig_cc FixedString(2),
-        resp_cc FixedString(2)
+        resp_cc FixedString(2),
+        file_src String,
+        day Date MATERIALIZED toDate(toDateTime(round(toFloat64(ts)), 'America/Los_Angeles'))
 ) 
 ENGINE MergeTree()
 PARTITION BY toYYYYMMDD(day) 
-ORDER BY (day, ip, ts) 
+ORDER BY (ts, sipHash64(orig_h,resp_h)) 
 SETTINGS index_granularity=8192
