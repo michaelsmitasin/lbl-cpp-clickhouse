@@ -1,0 +1,8 @@
+CREATE MATERIALIZED VIEW zeek_http_mv_uri 
+  ENGINE SummingMergeTree() 
+  PARTITION BY toYYYYMMDD(day) 
+  ORDER BY (day,uri) 
+  AS
+    SELECT day, uri, count(day) as uri_counts 
+    FROM zeek_http 
+    GROUP BY (day, uri)
