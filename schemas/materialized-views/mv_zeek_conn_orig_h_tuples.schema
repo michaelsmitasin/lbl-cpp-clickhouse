@@ -1,0 +1,19 @@
+CREATE TABLE mvt_zeek_conn_orig_h_tuples (
+  day Date,
+  orig_h String,
+  resp_h String,
+  resp_p UInt16,
+  proto Enum8('icmp'=1, 'tcp'=6, 'udp'=17),
+  conn_state Enum8('OTH'=0, 'REJ'=1, 'RSTO'=2, 'RSTOS0'=3, 'RSTR'=4, 'RSTRH'=5, 'S0'=6, 'S1'=7, 'S2'=8, 'S3'=9, 'SF'=10, 'SH'=11, 'SHR'=12),
+  conn_counts UInt64 )
+ENGINE SummingMergeTree()
+PARTITION BY (day)
+PRIMARY KEY (orig_h, resp_h, resp_p)
+ORDER BY (orig_h, resp_h, resp_p, proto, conn_state);
+
+CREATE MATERIALIZED VIEW mv_zeek_conn_orig_h_tuples 
+  TO mvt_zeek_conn_orig_h_tuples
+  AS
+    SELECT day, orig_h, resp_h, resp_p, proto, conn_state, count() AS conn_counts
+    FROM zeek_conn 
+    GROUP BY (day, orig_h, resp_h, resp_p, proto, conn_state)
