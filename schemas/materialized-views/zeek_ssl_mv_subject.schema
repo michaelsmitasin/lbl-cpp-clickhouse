@@ -1,0 +1,8 @@
+CREATE MATERIALIZED VIEW zeek_ssl_mv_subject 
+  ENGINE SummingMergeTree() 
+  PARTITION BY toYYYYMMDD(day) 
+  ORDER BY (day,subject) 
+  AS
+    SELECT day, subject, count(day) as subject_counts 
+    FROM zeek_ssl 
+    GROUP BY (day, subject)
