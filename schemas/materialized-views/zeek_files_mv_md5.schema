@@ -1,0 +1,8 @@
+CREATE MATERIALIZED VIEW zeek_files_mv_md5 
+  ENGINE SummingMergeTree() 
+  PARTITION BY toYYYYMMDD(day) 
+  ORDER BY (day, md5) 
+  AS 
+    SELECT day, md5, count(day) as md5_counts 
+    FROM zeek_files 
+    GROUP BY (day, md5)
