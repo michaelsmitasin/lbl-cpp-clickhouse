@@ -1,0 +1,8 @@
+CREATE MATERIALIZED VIEW zeek_conn_mv_orig_h 
+  ENGINE SummingMergeTree() 
+  PARTITION BY toYYYYMMDD(day) 
+  ORDER BY (day, orig_h) 
+  AS 
+    SELECT day, orig_h, count(day) as orig_h_counts 
+    FROM zeek_conn 
+    GROUP BY (day, orig_h)
