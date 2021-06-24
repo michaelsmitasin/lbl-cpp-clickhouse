@@ -1,0 +1,488 @@
+#! /bin/sh
+###############################################################################
+### Wrapper for SQL queries to clickhouse database of Zeek logs, materialized views version
+### 2020-07-27 mnsmitasin@lbl.gov
+#
+# CHANGES (2020-07-27):
+# 1) Update to use new V2 schema format (no longer row duplication / ip column)
+#
+# KNOWN ISSUES (2020-07-27):
+# 1) IPv6 addresses are handled literally, there is no attempt to pad or abbreviate, or interpret the address differently
+# 2) Unsorted columns search quite slow compared to sorted columns. Whenever possible, try to include a sorted column in your search
+#    as this will reduce the data set that's searched on.
+# 3) No support for multiple queries in a single command.
+# 4) The -b "bar" option will overlay output rows on top of each other, usually if -c is specified after it
+# 5) The -V and -X options may output duplicate columns if you specify search criteria because it builds the columns to output from those
+# 6) Only tested on FreeBSD, may not work on Linux due to different handling of 'date' options, possibly other issues
+#    number of SF rows, you'll get twice as many as really occurred. This is because the ingest process dups rows in order to sort
+#    by EITHER orig_h or resp_h.
+# 7) File searches that lack IP IOCs will give a harmless error due to it attempting secondary searches on non-existent IP result files.
+#
+###############################################################################
+### LOCAL VARIABLES
+
+# XXX Disable for prod
+DEBUG="T"
+DEBUGLOG="CLICKHOUSE-QUERY-debug.log"
+
+# Contact
+MAILTO="admin@example.com"
+
+CLICKHOUSE_SERVER="clickhouse.example.com"
+CHKEY="CLICKHOUSE-feeds.key"
+
+# PROD PATH
+IOCSEARCHPATH="/usr/local/bin"
+
+# default values
+FLAVOR="conn"
+EXCLUSIVEBIT=""
+LOOKBACK="180"
+TARGET=""
+PREWHERE=""
+TRANSLATEDRESULTS=""
+SEARCHMODE="="
+ORSEARCHTERMS=""
+ANDSEARCHTERMS=""
+RESULTS="day"
+GROUPBY="group by $RESULTS"
+ORDERBY="day"
+MAXMEM="10000000000"
+CASEINSENSITIVE=""
+MVQUERY="0"
+MVTWARNING=""
+NOOPBIT="0"
+
+STARTDATE=$(date -j -v-"$LOOKBACK"d +"%Y-%m-%d")
+
+###############################################################################
+### FUNCTIONS
+
+USAGE(){
+echo ""
+echo "Usage:"
+echo "  -d [days to look back]  number of days back to search (default: $LOOKBACK)"
+echo "  -f [filename]           file containing IOCs to search"
+echo "  -l                      loose search all options after this (unless prohibited), wildcard char is %"
+echo "  -c                      count occurrences"
+# This functionality not available in ioc-search, see ioc-drill
+#echo " -b [max value]          EXPERIMENTAL: draw a bar graph of counted occurrences, scaled to [max value]"
+#echo "                         (Known issue: if -b precedes -c, may cause output rows to be merged together)"
+#echo " -X                      Show extra results (more columns, specific per table)"
+#echo " -V                      Verbose mode; select all columns. Can be VERY slow!"
+#echo " -Zz                     Include the name of the Zeek cluster where the given record was found"
+echo "  -Q                      Custom query, write whatever SQL-like query you want"
+echo "  -M [memory]             Max memory per query in GB"
+echo "  -n                      noop; show SQL query and exit"
+echo ""
+echo "Table-dependent options (table is set automatically based on option):"
+echo "Zeek conn.log"
+echo "  -i [ip_address]         same as 'orig_h OR resp_h' (added together)"
+echo "  -O [orig_ip_address]"
+echo "  -R [resp_ip_address]"
+echo "  -D [dst_port]           "
+echo "  -S [src_port]           "
+echo "  -P [ip_address]         counts of different protos for this IP address"
+echo "  -C [ip_address]         counts of different conn_states for this IP address"
+echo "  -B [ip_address]         total orig_ip_bytes and resp_ip_bytes for this IP address"
+echo "                          NOTE: reports orig_ip_bytes where IP is orig_h and resp_ip_bytes where IP is resp_h."
+echo "                          However, it is not resp_ip_bytes where the IP is orig_h or vice-versa."
+echo "  -z [ip_address]         search orig_h or resp_h and return orig_h, resp_h, resp_p, proto, conn_state"
+echo "                          NOTE: This is a smaller data set, it only contains $($IOCSEARCHPATH/ioc-search -Q "SELECT count(distinct partition) FROM system.parts where table = 'mvt_zeek_conn_orig_h_tuples'") days of data."
+echo ""
+echo "Zeek http.log"
+echo "  -h [host]"
+echo "  -u [URI]"
+echo ""
+echo "Zeek dns.log"
+echo "  -q [query]"
+echo "  -a [answers]"
+echo ""
+echo "Zeek ssl.log"
+echo "  -s [server_name]"
+echo "  -U [subject]"
+echo ""
+echo "Zeek files.log"
+echo "  -m [md5_hash]"
+echo "  -1 [sha1_hash]"
+echo ""
+echo "Zeek smtp.log"
+echo "  -F [mailfrom]"
+echo "  -T [rcptto]"
+echo ""
+echo "Basic Examples:"
+echo "  ${0##*/} -i 192.0.2.45                          conn.logs for IP as either orig_h or resp_h"
+echo "  ${0##*/} -h example.com                         http.logs for hostname"
+echo "  ${0##*/} -s example.com                         ssl.logs for server_name"
+echo "  ${0##*/} -m 91db4e37d71fd51b5dd1x64836602440            files.logs for md5 hash"
+echo "  ${0##*/} -q example.com                         dns.logs for DNS query question"
+echo "  ${0##*/} -F admin@example.com                           smtp.logs for sender email address"
+echo ""
+echo "Advanced Examples:"
+echo "  ${0##*/} -Q \"SELECT count(day) FROM zeek_conn\"        custom query counting all rows in a table"
+echo ""
+echo "This is the fast but simple search tool. If you need more in-depth analysis, see ioc-drill."
+echo "You CANNOT chain criteria with this tool, except things like -l, -d, -c. I.e. you cannot search both IP and port. Use ioc-drill instead."
+echo ""
+exit 1
+}
+
+# check that some option is defined
+if [ -z "$(echo $1 | grep "^-")" ]
+then
+  echo "Error: No options set."
+  USAGE
+
+fi
+
+CHECKEXCLUSIVEBIT(){
+  if [ -z "$EXCLUSIVEBIT" ]
+  then
+    EXCLUSIVEBIT="1"
+  else
+    echo "Error: cannot run multiple queries at once."
+    exit 1
+  fi
+}
+
+BUILDTABLE(){
+  TABLE="zeek_$FLAVOR"
+}
+
+ADDTERMS(){
+  if [ -z "$CASEINSENSITIVE" ]
+  then
+        ANDSEARCHTERMS="$ANDSEARCHTERMS AND $TERM $SEARCHMODE '$OPTARG'"
+  else
+        ANDSEARCHTERMS="$ANDSEARCHTERMS AND lower($TERM) $SEARCHMODE lower('$OPTARG')"
+  fi
+  RESULTS="$RESULTS, $TERM"
+  GROUPBY="group by $RESULTS"
+}
+
+PREWHERE(){
+  if [ -z "$PREWHERE" ]
+  then
+    PREWHERE="PREWHERE $1 $SEARCHMODE '$OPTARG'"
+  else
+    PREWHERE="$PREWHERE OR $1 $SEARCHMODE '$OPTARG'"
+  fi
+}
+
+# XXX this is a hack for UInt16 not liking single quotes or LIKE searches
+ADDHARDTERMS(){
+  ANDSEARCHTERMS="$ANDSEARCHTERMS AND $TERM = $OPTARG"
+  RESULTS="$RESULTS, $TERM"
+  GROUPBY="GROUP BY $RESULTS"
+}
+
+# XXX this is a hack for Enums not liking LIKE but wanting single quotes
+ADDHARDTERMS2(){
+  ANDSEARCHTERMS="$ANDSEARCHTERMS AND $TERM = '$OPTARG'"
+  RESULTS="$RESULTS, $TERM"
+  GROUPBY="GROUP BY $RESULTS"
+}
+
+
+BUILDEXTRACOLUMNS(){
+  if [ -z "$EXTRABIT" ]
+  then
+    :
+  else
+    case $FLAVOR in
+      conn) EXTRACOLUMNS="orig_h, resp_h, resp_p, proto, conn_state";;
+      http) EXTRACOLUMNS="orig_h, orig_p, method, host, uri, status_code";;
+      dns) EXTRACOLUMNS="orig_h, resp_h, query, qtype_name, answers";;
+      ssl) EXTRACOLUMNS="orig_h, resp_h, server_name";;
+      files) EXTRACOLUMNS="tx_hosts, rx_hosts, mime_type, filename";;
+      smtp) EXTRACOLUMNS="mailfrom, rcptto, subject";;
+    esac
+    RESULTS=$(echo "day, $EXTRACOLUMNS, count()" | sed 's/, $//g'); GROUPBY="group by day, $(echo $EXTRACOLUMNS | sed 's/,$//g')";
+  fi
+}
+
+BUILDSQL(){
+  if [ "$MVQUERY" = "1" ]
+  then
+    RESULTS="day, ip, orig_h_hits, resp_h_hits"
+    SQLQUERY="SELECT day, ip, orig_h_hits, resp_h_hits FROM ( SELECT day, orig_h AS ip, sum(orig_h_counts) AS orig_h_hits FROM zeek_conn_mv_orig_h PREWHERE day >= '"$STARTDATE"' WHERE orig_h $SEARCHMODE '$TARGET' GROUP BY day, orig_h ORDER by day ASC ) FULL JOIN ( SELECT day, resp_h AS ip, sum(resp_h_counts) as resp_h_hits FROM zeek_conn_mv_resp_h PREWHERE day >= '"$STARTDATE"' WHERE resp_h $SEARCHMODE '$TARGET' GROUP BY day, resp_h ORDER by day ASC ) USING day, ip ORDER BY day ASC"
+  elif [ "$MVQUERY" = "2" ]
+  then
+    RESULTS="day, ip, orig_h_conn_state, resp_h_conn_state"
+    SQLQUERY="SELECT day, ip, conn_state, orig_h_conn_state, resp_h_conn_state FROM ( SELECT day, orig_h AS ip, conn_state, sum(conn_counts) AS orig_h_conn_state FROM zeek_conn_mv_orig_h_conn_state PREWHERE day >= '"$STARTDATE"' WHERE orig_h $SEARCHMODE '$TARGET' GROUP BY day, orig_h, conn_state ORDER by day ASC ) FULL JOIN ( SELECT day, resp_h AS ip, conn_state, sum(conn_counts) as resp_h_conn_state FROM zeek_conn_mv_resp_h_conn_state PREWHERE day >= '"$STARTDATE"' WHERE resp_h $SEARCHMODE '$TARGET' GROUP BY day, resp_h, conn_state ORDER by day ASC ) USING day, ip, conn_state ORDER BY day ASC"
+  elif [ "$MVQUERY" = "3" ]
+  then
+    RESULTS="day, ip, proto, orig_h_proto_counts, resp_h_proto_counts"
+    SQLQUERY="SELECT day, ip, proto, orig_h_proto_counts, resp_h_proto_counts FROM ( SELECT day, orig_h AS ip, proto, sum(conn_counts) AS orig_h_proto_counts FROM zeek_conn_mv_orig_h_proto PREWHERE day >= '"$STARTDATE"' WHERE orig_h $SEARCHMODE '$TARGET' GROUP BY day, orig_h, proto ORDER by day ASC ) FULL JOIN ( SELECT day, resp_h AS ip, proto, sum(conn_counts) as resp_h_proto_counts FROM zeek_conn_mv_resp_h_proto PREWHERE day >= '"$STARTDATE"' WHERE resp_h $SEARCHMODE '$TARGET' GROUP BY day, resp_h, proto ORDER by day ASC ) USING day, ip, proto ORDER BY day ASC"
+  elif [ "$MVQUERY" = "4" ]
+  then
+    ### NOTE: this splits them out by direction, so it reports orig_ip_bytes where the ip is orig_h, and resp_ip_bytes where the ip is resp_h.
+    ### It does NOT report say, resp_ip_bytes where the ip is the orig_h or vice-versa.
+    RESULTS="day, ip, total_orig_ip_bytes, total_resp_ip_bytes"
+    SQLQUERY="SELECT day, ip, total_orig_ip_bytes, total_resp_ip_bytes FROM ( SELECT day, orig_h AS ip, sum(orig_ip_bytes) AS total_orig_ip_bytes FROM zeek_conn_mv_orig_h_bytes PREWHERE day >= '"$STARTDATE"' WHERE orig_h $SEARCHMODE '$TARGET' GROUP BY day, orig_h ORDER by day ASC ) FULL JOIN ( SELECT day, resp_h AS ip, sum(resp_ip_bytes) as total_resp_ip_bytes FROM zeek_conn_mv_resp_h_bytes PREWHERE day >= '"$STARTDATE"' WHERE resp_h $SEARCHMODE '$TARGET' GROUP BY day, resp_h ORDER by day ASC ) USING day, ip ORDER BY day ASC"
+  elif [ "$MVQUERY" = "5" ]
+  then
+    # comment out warning, we've got quite a lot of days in there now MNSmitasin 2021-05-11
+    #MVTWARNING="1"
+    RESULTS="day, orig_h, resp_h, resp_p, proto, conn_state, conn_counts"
+    SQLQUERY="SELECT day, orig_h, resp_h, resp_p, proto, conn_state, conn_counts FROM ( SELECT day, orig_h, resp_h, resp_p, proto, conn_state, sum(conn_counts) AS conn_counts FROM mvt_zeek_conn_orig_h_tuples PREWHERE day >= '"$STARTDATE"' WHERE orig_h $SEARCHMODE '$TARGET' GROUP BY day, orig_h, resp_h, resp_p, proto, conn_state ORDER by day ASC ) FULL JOIN ( SELECT day, orig_h, resp_h, resp_p, proto, conn_state, sum(conn_counts) AS conn_counts FROM mvt_zeek_conn_resp_h_tuples PREWHERE day >= '"$STARTDATE"' WHERE resp_h $SEARCHMODE '$TARGET' GROUP BY day, orig_h, resp_h, resp_p, proto, conn_state ORDER by day ASC ) USING day, orig_h, resp_h, resp_p, proto, conn_state, conn_counts ORDER BY day, orig_h, resp_h, resp_p, proto, conn_state ASC"
+  elif [ "$MVQUERY" = "0" ]
+  then
+    BUILDEXTRACOLUMNS
+    BUILDTABLE
+    SQLQUERY="SELECT $RESULTS FROM $TABLE "$PREWHERE" WHERE ( day>='"$STARTDATE"' $ORSEARCHTERMS $ANDSEARCHTERMS ) $GROUPBY ORDER BY $ORDERBY ASC"
+  fi
+}
+
+SEARCH(){
+  # XXX uncomment this for prod
+  ssh -i $CHKEY -l feeds $CLICKHOUSE_SERVER "clickhouse-client --joined_subquery_requires_alias=0 --query=\"$SQLQUERY\" --max_memory_usage=$MAXMEM" "$TRANSLATERESULTS"
+  if [ "$DEBUG" = "F" ]
+  then
+    :
+  elif [ "$DEBUG" = "T" ]
+  then
+    #echo "# DEBUG: logging enabled to $DEBUGLOG" >&2
+    echo "$(date -j +%s),$USER,${0##*/},\"$SQLQUERY\"" >> $DEBUGLOG
+  else
+    echo "Error in \$DEBUG value, exiting."
+    exit 1
+  fi
+}
+
+###############################################################################
+### FILE SEARCH FUNCTIONS
+
+REMOVECOMMENTS(){
+        grep -v "^#" "$INPUTFILE"
+}
+
+BUILDTEMPTABLES(){
+        THISTABLEPREFIX="tempsearchtable_$(date -j +%s)"
+        $IOCSEARCHPATH/ioc-search -Q "CREATE TABLE $THISTABLEPREFIX (ioc String, type String) ENGINE MergeTree() ORDER BY (ioc) SETTINGS index_granularity=8192"
+}
+
+FILETOSQL(){
+        mkdir -p $WORKINGDIR/SQL/
+        BUILDTEMPTABLES
+        for TEMPFILE in $(find $WORKINGDIR -name "temp.*" -type f);
+        do
+                case $(basename $TEMPFILE) in
+                        temp.ipv4) TYPE="ip"; TABLENAME="zeek_conn_mv_orig_h";;
+                        temp.ipv6) TYPE="ip"; TABLENAME="zeek_conn_mv_orig_h";;
+                        temp.uri) TYPE="uri"; TABLENAME="zeek_http_mv_uri";;
+                        temp.email) TYPE="email"; TABLENAME="zeek_smtp_mv_mailfrom";;
+                        temp.md5) TYPE="md5"; TABLENAME="zeek_files_mv_md5";;
+                        temp.sha1) TYPE="sha1"; TABLENAME="zeek_files_mv_sha1";;
+                        temp.domain) TYPE="domain"; TABLENAME="zeek_dns_mv_query";;
+                esac
+                ssh -i $CHKEY -l feeds $CLICKHOUSE_SERVER "cat $TEMPFILE | sed 's/$/,$TYPE/g' | clickhouse-client --query=\"INSERT into $THISTABLEPREFIX FORMAT CSV\""
+        done
+        BUILDQUERY(){
+        echo "SELECT $RESULTS FROM $TABLENAME PREWHERE day >= '$STARTDATE' WHERE $SEARCHTERM IN (SELECT ioc FROM $THISTABLEPREFIX WHERE type = '$TYPE') GROUP BY day, $SEARCHTERM ORDER BY day ASC;" >> $WORKINGDIR/SQL/$TABLENAME
+        }
+        # IP searches
+        if [ -z "$(cat $WORKINGDIR/temp.ipv4 && cat $WORKINGDIR/temp.ipv6)" ]
+        then
+                :
+        else
+                SEARCHTERM="orig_h"; TYPE="ip"; TABLENAME="zeek_conn_mv_orig_h"; RESULTS="day, orig_h, sum(orig_h_counts)"; BUILDQUERY;
+                SEARCHTERM="resp_h"; TYPE="ip"; TABLENAME="zeek_conn_mv_resp_h"; RESULTS="day, resp_h, sum(resp_h_counts)"; BUILDQUERY;
+        fi
+        # URI searches
+        if [ -z "$(cat $WORKINGDIR/temp.uri)" ]
+        then
+                :
+        else
+                SEARCHTERM="uri"; TYPE="uri"; TABLENAME="zeek_http_mv_uri"; RESULTS="day, uri, sum(uri_counts)"; BUILDQUERY;
+        fi
+        # Email searches
+        if [ -z "$(cat $WORKINGDIR/temp.email)" ]
+        then
+                :
+        else
+                SEARCHTERM="mailfrom"; TYPE="email"; TABLENAME="zeek_smtp_mv_mailfrom"; RESULTS="day, mailfrom, sum(mailfrom_counts)"; BUILDQUERY;
+                SEARCHTERM="rcptto"; TYPE="email"; TABLENAME="zeek_smtp_mv_rcptto"; RESULTS="day, rcptto, sum(rcptto_counts)"; BUILDQUERY;
+        fi
+        # md5 searches
+        if [ -z "$(cat $WORKINGDIR/temp.md5)" ]
+        then
+                :
+        else
+                SEARCHTERM="md5"; TYPE="md5"; TABLENAME="zeek_files_mv_md5"; RESULTS="day, md5, sum(md5_counts)"; BUILDQUERY;
+        fi
+        # sha1 searches
+        if [ -z "$(cat $WORKINGDIR/temp.sha1)" ]
+        then
+                :
+        else
+                SEARCHTERM="sha1"; TYPE="sha1"; TABLENAME="zeek_files_mv_sha1"; RESULTS="day, sha1, sum(sha1_counts)"; BUILDQUERY;
+        fi
+        # DNS searches
+        if [ -z "$(cat $WORKINGDIR/temp.domain)" ]
+        then
+                :
+        else
+                SEARCHTERM="query"; TYPE="domain"; TABLENAME="zeek_dns_mv_query"; RESULTS="day, query, sum(query_counts)"; BUILDQUERY;
+                SEARCHTERM="answers"; TYPE="domain"; TABLENAME="zeek_dns_mv_answers"; RESULTS="day, answers, sum(answers_counts)"; BUILDQUERY;
+                SEARCHTERM="host"; TYPE="domain"; TABLENAME="zeek_http_mv_host"; RESULTS="day, host, sum(host_counts)"; BUILDQUERY;
+                SEARCHTERM="server_name"; TYPE="domain"; TABLENAME="zeek_ssl_mv_server_name"; RESULTS="day, server_name, sum(server_name_counts)"; BUILDQUERY;
+                SEARCHTERM="subject"; TYPE="domain"; TABLENAME="zeek_ssl_mv_subject"; RESULTS="day, subject, sum(subject_counts)"; BUILDQUERY;
+        fi
+}
+
+PARSE() {
+        # remove comments
+        NOCOMMENTS=$(REMOVECOMMENTS)
+
+        IPV4=$(echo "$NOCOMMENTS" | grep "^[[:digit:]]\{1,3\}\.[[:digit:]]\{1,3\}\.[[:digit:]]\{1,3\}\.[[:digit:]]\{1,3\}$")
+        IPV6=$(echo "$NOCOMMENTS" | grep "^[[:xdigit:]]\{1,4\}\:" | tr '[:upper:]' '[:lower:]' | fgrep -v "/")
+        URI=$(echo "$NOCOMMENTS" | tr '[:upper:]' '[:lower:]' | grep "^/")
+        EMAIL=$(echo "$NOCOMMENTS" | grep "^[[:print:]]*@[[:print:]]*\.[[:print:]]*" | tr '[:upper:]' '[:lower:]' )
+        MD5HASH=$(echo "$NOCOMMENTS" | grep "^[[:alnum:]]\{32\}$" | tr '[:upper:]' '[:lower:]')
+        SHA1HASH=$(echo "$NOCOMMENTS" | grep "^[[:alnum:]]\{40\}$" | tr '[:upper:]' '[:lower:]')
+        DOMAIN=$(echo "$NOCOMMENTS" | grep "^[[:print:]]*\.[[:print:]]*$" | fgrep -v "/" | fgrep -v "@" | tr '[:upper:]' '[:lower:]')
+
+        echo "$IPV4" > "$WORKINGDIR"/temp.ipv4
+        echo "$IPV6" > "$WORKINGDIR"/temp.ipv6
+        echo "$URI" > "$WORKINGDIR"/temp.uri
+        echo "$EMAIL" > "$WORKINGDIR"/temp.email
+        echo "$MD5HASH" > "$WORKINGDIR"/temp.md5
+        echo "$SHA1HASH" > "$WORKINGDIR"/temp.sha1
+        echo "$DOMAIN" > "$WORKINGDIR"/temp.domain
+
+        OTHER=$(echo "$NOCOMMENTS" | fgrep -v -f "$WORKINGDIR"/temp.ipv4 | fgrep -v -f "$WORKINGDIR"/temp.ipv6 | fgrep -v -f "$WORKINGDIR"/temp.uri | fgrep -v -f "$WORKINGDIR"/temp.email | fgrep -v -f "$WORKINGDIR"/temp.md5 | fgrep -v -f "$WORKINGDIR"/temp.sha1 | fgrep -v -f "$WORKINGDIR"/temp.domain | grep -v "^[[:blank:]]*$")
+
+        if [ -z "$OTHER" ]
+        then
+                FILETOSQL
+                echo "Wrote queries to: $WORKINGDIR/SQL/"
+                echo ""
+        else
+                echo "ERROR: Some data was unable to be parsed into known categories. Exiting."
+                echo ""
+                echo "Unparsable data:"
+                echo "$OTHER"
+                exit 1
+        fi
+}
+
+SEARCHMULTI(){
+        echo "Running parallel SQL queries" >&2
+        # XXX still need to do something here so the output files are created with something other than feeds:feeds
+        ssh -i $CHKEY -l feeds $CLICKHOUSE_SERVER "find $WORKINGDIR/SQL/ -name \"zeek*\" | parallel -j20 --eta 'cat {} | clickhouse-client --multiquery --max_memory_usage=$MAXMEM >> $WORKINGDIR/{/}.{%}.results'"
+        echo ""
+}
+
+DROPTEMPTABLES(){
+        $IOCSEARCHPATH/ioc-search -Q "DROP TABLE $THISTABLEPREFIX"
+}
+
+FORMATOUTPUT(){
+        cat $WORKINGDIR/*zeek_conn*.results | sort -nk1 >> $WORKINGDIR/ZEEK_CONN.results
+        cat $WORKINGDIR/*zeek_dns*.results | sort -nk1 >> $WORKINGDIR/ZEEK_DNS.results
+        cat $WORKINGDIR/*zeek_files*.results | sort -nk1 >> $WORKINGDIR/ZEEK_FILES.results
+        cat $WORKINGDIR/*zeek_http*.results | sort -nk1 >> $WORKINGDIR/ZEEK_HTTP.results
+        cat $WORKINGDIR/*zeek_smtp*.results | sort -nk1 >> $WORKINGDIR/ZEEK_SMTP.results
+        cat $WORKINGDIR/*zeek_ssl*.results | sort -nk1 >> $WORKINGDIR/ZEEK_SSL.results
+}
+
+SEARCHFILE(){
+        MAXMEM="50000000000"
+        WORKINGDIR="/var/tmp/ioc-search-$(date -j +%s)"
+        mkdir -p $WORKINGDIR
+        # Hacks to allow feeds user to write output to this dir
+        chown $USER:mt $WORKINGDIR
+        chmod 777 $WORKINGDIR
+        echo "# Parsing: $INPUTFILE" >&2
+        PARSE
+        SEARCHMULTI
+        chmod 755 $WORKINGDIR
+        DROPTEMPTABLES
+        echo ""
+        echo "Search complete, sorting by timestamp, this can take a while..."
+        echo "If you don't want to wait, you can Ctrl+C this sort and just go to $WORKINGDIR"
+        echo ""
+        FORMATOUTPUT > /dev/null 2>&1 
+        echo "Total: $(cat $WORKINGDIR/ZEEK_*.results | wc -l) results:" >&2
+        find $WORKINGDIR/ -name "ZEEK_*.results" | xargs -n1 -I% wc -l % >&2
+}
+
+###############################################################################
+### EXECUTION
+
+# Check options and arguments after options which are indicated with a : and passed as OPTARG
+while getopts "t:d:f:lcb:XVZnQ:M:i:O:R:D:S:P:C:B:z:u:h:q:a:s:U:m:1:F:T:?" OPT; do
+  case $OPT in
+        # generic options
+   d) STARTDATE=$(date -j -v-"$OPTARG"d +"%Y-%m-%d") ;; # set lookback
+   f) INPUTFILE="$OPTARG"; SEARCHFILE; exit 0 ;;
+   l) SEARCHMODE="LIKE" ;;
+   c) RESULTS="$RESULTS, sum("$TERM"_counts)" ;;
+   #b) RESULTS="$RESULTS, bar(count(day),0, $OPTARG, 20)"; TRANSLATERESULTS=" | tr \"\342\226\210\" \"-\"" ;;
+   #X) EXTRABIT="1" ;;
+   #V) RESULTS="*"; GROUPBY=""; ORDERBY="ts";;
+   #Z) RESULTS="$RESULTS, file_src"; GROUPBY="$GROUPBY, file_src" ;;
+   n) NOOPBIT="1" ;;
+   Q) SQLQUERY="$OPTARG"; DEBUG="T"; SEARCH; exit 0;;
+   M) MAXMEM="$OPTARG"000000000"";;
+        # conn queries
+   i) MVQUERY="1"; TARGET="$OPTARG";;
+   O) FLAVOR="conn_mv_orig_h"; TERM="orig_h"; ADDTERMS;;
+   R) FLAVOR="conn_mv_resp_h"; TERM="resp_h"; ADDTERMS;;
+   D) FLAVOR="conn_mv_resp_p"; TERM="resp_p"; ADDHARDTERMS ;;
+   S) FLAVOR="conn_mv_orig_p"; TERM="orig_p"; ADDHARDTERMS ;;
+   P) MVQUERY="3"; TARGET="$OPTARG";;
+   C) MVQUERY="2"; TARGET="$OPTARG";;
+   B) MVQUERY="4"; TARGET="$OPTARG";;
+   z) MVQUERY="5"; TARGET="$OPTARG";;
+        # http queries
+   u) FLAVOR="http_mv_uri"; TERM="uri"; CASEINSENSITIVE="1"; ADDTERMS ;;
+   h) FLAVOR="http_mv_host"; TERM="host"; CASEINSENSITIVE="1"; ADDTERMS ;;
+        # dns queries
+   q) CHECKEXCLUSIVEBIT; FLAVOR="dns_mv_query"; TERM="query"; CASEINSENSITIVE="1"; ADDTERMS ;;
+   a) CHECKEXCLUSIVEBIT; FLAVOR="dns_mv_answers"; TERM="answers"; CASEINSENSITIVE="1"; ADDTERMS ;;
+        # ssl queries
+   s) CHECKEXCLUSIVEBIT; FLAVOR="ssl_mv_server_name"; TERM="server_name"; CASEINSENSITIVE="1"; ADDTERMS ;;
+   U) CHECKEXCLUSIVEBIT; FLAVOR="ssl_mv_subject"; TERM="subject"; CASEINSENSITIVE="1"; ADDTERMS ;;
+        # files queries
+   m) CHECKEXCLUSIVEBIT; FLAVOR="files_mv_md5"; TERM="md5"; CASEINSENSITIVE="1"; ADDTERMS;;
+   1) CHECKEXCLUSIVEBIT; FLAVOR="files_mv_sha1"; TERM="sha1"; CASEINSENSITIVE="1"; ADDTERMS ;;
+        # smtp queries
+   F) FLAVOR="smtp_mv_mailfrom"; TERM="mailfrom"; CASEINSENSITIVE="1"; ADDTERMS ;;
+   T) FLAVOR="smtp_mv_rcptto"; TERM="rcptto"; CASEINSENSITIVE="1"; ADDTERMS ;;
+   ?) USAGE ;;
+  esac
+done
+
+BUILDSQL
+
+if [ "$NOOPBIT" = "1" ]
+then
+        echo "$SQLQUERY"
+        exit 0
+elif [ "$NOOPBIT" = "0" ]
+then
+        OUTPUT=$(SEARCH)
+fi
+
+if [ -z "$OUTPUT" ]
+then
+  echo "stderr: no results found" >&2
+else
+  # print headers
+  echo "# $RESULTS" | tr "," "\t" | sed 's/(day)//g'
+  echo "$OUTPUT"
+fi
+
+if [ ! -z "$MVTWARNING" ]
+then
+    echo "" >&2
+    echo "INFO: Be aware, this table only contains a max of $($IOCSEARCHPATH/ioc-search -Q "SELECT count(distinct partition) FROM system.parts where table = 'mvt_zeek_conn_orig_h_tuples'") days of data. If you searched more than that, you won't see those results here." >&2
+    echo "" >&2
+fi
+
+###############################################################################
+### CLEANUP, log, exit cleanly
+# logger "$0 - Exited cleanly"
+exit 0
