@@ -1,0 +1,8 @@
+CREATE MATERIALIZED VIEW zeek_smtp_mv_mailfrom 
+  ENGINE SummingMergeTree() 
+  PARTITION BY toYYYYMMDD(day) 
+  ORDER BY (day,mailfrom) 
+  AS
+    SELECT day, mailfrom, count(day) as mailfrom_counts 
+    FROM zeek_smtp 
+    GROUP BY (day, mailfrom)
