@@ -1,7 +1,5 @@
 CREATE TABLE zeek_dns
 (
-        day Date,
-        file_src String,
         ts String,
         uid String,
         orig_h String, 
@@ -25,9 +23,11 @@ CREATE TABLE zeek_dns
         Z UInt8,
         answers String,
         TTLs String,
-        rejected Enum8('F'=0, 'T'=1)
+        rejected Enum8('F'=0, 'T'=1),
+        file_src String,
+        day Date MATERIALIZED toDate(toDateTime(round(toFloat64(ts)), 'America/Los_Angeles'))
 ) 
 ENGINE MergeTree()
 PARTITION BY toYYYYMMDD(day) 
-ORDER BY (day, query, answers, ts) 
+ORDER BY (ts, sipHash64(query, answers)) 
 SETTINGS index_granularity=8192
