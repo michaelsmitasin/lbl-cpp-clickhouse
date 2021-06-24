@@ -1,0 +1,8 @@
+CREATE MATERIALIZED VIEW zeek_dns_mv_query_answers 
+  ENGINE SummingMergeTree() 
+  PARTITION BY toYYYYMMDD(day) 
+  ORDER BY (day, query) 
+  AS
+    SELECT DISTINCT day, query, answers 
+    FROM zeek_dns 
+    GROUP BY (day, query, answers)
