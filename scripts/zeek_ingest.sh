@@ -2,7 +2,13 @@
 ###############################################################################
 # Ingest script for Zeek logs into Clickhouse.
 #
-# MNSmitasin@lbl.gov 2019-06-16
+# MNSmitasin@lbl.gov 2021-06-24
+#
+# Dependencies:
+# (Note: this was written for Linux/Ubuntu, some changes may be needed for other OSes)
+# gawk
+# zeek-cut
+# 
 # Example:
 # zeek_ingest.sh conn.log -m            verify metadata (filename, path, etc)
 # zeek_ingest.sh conn.log -v            verify data added to stream (date, file_src)
@@ -17,63 +23,52 @@ MAILTO="admin@example.com"
 FULLPATH="$1"
 FILENAME="$(basename $FULLPATH)"
 FILESRC="$(echo $FILENAME | cut -d"." -f3)"
-FILEDATE="$(echo $FILENAME | cut -d"." -f4 | cut -d"-" -f-3)"
 DIRONLY="$(dirname $FULLPATH)"
+ZEEKCUTPATH="/usr/local/bin/zeek-cut"
 
 ###############################################################################
 ### FUNCTIONS
 
 VERIFYMETADATA(){
-        echo "$FULLPATH,$FILESRC,$FILEDATE,$DIRONLY"
+        echo "$FULLPATH,$FILESRC,$DIRONLY"
 }
 
 VERIFYADDDATA(){
         zgrep -v "^#" $FULLPATH | \
+                # XXX comment out below for prod
                 head -1 | \
-                gawk -v FILESRC="$FILESRC" -v FILEDATE="$FILEDATE" -F '\t' 'BEGIN {OFS = FS} {print \
-                FILEDATE "\t" FILESRC }'
+                gawk -v FILESRC="$FILESRC" -F '\t' 'BEGIN {OFS = FS} {print \
+                FILESRC }'
 }
 
 FORMATCONN(){
-        zgrep -v "^#" $FULLPATH | \
-                gawk -v FILESRC="$FILESRC" -v FILEDATE="$FILEDATE" -F '\t' 'BEGIN {OFS = FS} {print \
-                FILEDATE "\t" FILESRC "\t" $3 "\t" $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $8 \
-                "\t" $9 "\t" $10 "\t" $11 "\t" $12 "\t" $13 "\t" $14 "\t" $15 "\t" $16 \
-                "\t" $17 "\t" $18 "\t" $19 "\t" $20 "\t" $21 "\t" $22 "\t" $23 "\t" $24 "\n" \
-                FILEDATE "\t" FILESRC "\t" $5 "\t" $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $8 \
-                "\t" $9 "\t" $10 "\t" $11 "\t" $12 "\t" $13 "\t" $14 "\t" $15 "\t" $16 \
-                "\t" $17 "\t" $18 "\t" $19 "\t" $20 "\t" $21 "\t" $22 "\t" $23 "\t" $24 }'
+        zcat $FULLPATH | \
+                $ZEEKCUTPATH ts uid id.orig_h id.orig_p id.resp_h id.resp_p proto service duration orig_bytes resp_bytes conn_state local_orig local_resp missed_bytes history orig_pkts orig_ip_bytes resp_pkts resp_ip_bytes tunnel_parents | sed "s/$/\t$FILESRC/g;"
 }
 
 FORMATDNS(){
-        zgrep -v "^#" $FULLPATH | \
-                gawk -v FILESRC="$FILESRC" -v FILEDATE="$FILEDATE" -F '\t' 'BEGIN {OFS = FS} {print \
-                FILEDATE "\t" FILESRC "\t" $0 }'
+        zcat $FULLPATH | \
+                $ZEEKCUTPATH ts uid id.orig_h id.orig_p id.resp_h id.resp_p proto trans_id rtt query qclass qclass_name qtype qtype_name rcode rcode_name AA TC RD RA Z answers TTLs rejected | sed "s/$/\t$FILESRC/g;"
 }
 
 FORMATFILES(){
-        zgrep -v "^#" $FULLPATH | \
-                gawk -v FILESRC="$FILESRC" -v FILEDATE="$FILEDATE" -F '\t' 'BEGIN {OFS = FS} {print \
-                FILEDATE "\t" FILESRC "\t" $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $8 "\t" $9 "\t" $10 "\t" $11 "\t" $12 \
-                "\t" $13 "\t" $14 "\t" $15 "\t" $16 "\t" $17 "\t" $18 "\t" $19 "\t" $20 "\t" $21 "\t" $22 "\t" $23 }'
+        zcat $FULLPATH | \
+                $ZEEKCUTPATH ts fuid tx_hosts rx_hosts conn_uids source depth analyzers mime_type filename duration local_orig is_orig seen_bytes total_bytes missing_bytes overflow_bytes timedout parent_fuid md5 sha1 sha256 extracted | sed "s/$/\t$FILESRC/g;"
 }
 
 FORMATHTTP(){
-        zgrep -v "^#" $FULLPATH | \
-                gawk -v FILESRC="$FILESRC" -v FILEDATE="$FILEDATE" -F '\t' 'BEGIN {OFS = FS} {print \
-                FILEDATE "\t" FILESRC "\t" $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $9 "\t" $10 "\t" $11 "\t" $12 "\t" $14 }
+        zcat $FULLPATH | \
+                $ZEEKCUTPATH ts uid id.orig_h id.orig_p id.resp_h id.resp_p trans_depth method host uri referrer version user_agent status_code | sed "s/$/\t$FILESRC/g;"
 }
 
 FORMATSMTP(){
-        zgrep -v "^#" $FULLPATH | \
-                gawk -v FILESRC="$FILESRC" -v FILEDATE="$FILEDATE" -F '\t' 'BEGIN {OFS = FS} {print \
-                FILEDATE "\t" FILESRC "\t" $0 }'
+        zcat $FULLPATH | \
+                $ZEEKCUTPATH ts uid id.orig_h id.orig_p id.resp_h id.resp_p trans_depth helo mailfrom rcptto date from to cc reply_to msg_id in_reply_to subject x_originating_ip first_received second_received last_reply path user_agent tls fuids is_webmail | sed "s/$/\t$FILESRC/g;"
 }
 
 FORMATSSL(){
-        zgrep -v "^#" $FULLPATH | \
-                gawk -v FILESRC="$FILESRC" -v FILEDATE="$FILEDATE" -F '\t' 'BEGIN {OFS = FS} {print \
-                FILEDATE "\t" FILESRC "\t" $0 }'
+        zcat $FULLPATH | \
+                $ZEEKCUTPATH ts uid id.orig_h id.orig_p id.resp_h id.resp_p version cipher curve server_name resumed last_alert next_protocol established cert_chain_fuids client_cert_chain_fuids subject issuer client_subject client_issuer validation_status | sed "s/$/\t$FILESRC/g;"
 }
 
 FORMATDATA(){
@@ -100,5 +95,4 @@ esac
 
 ###############################################################################
 ### CLEANUP, log, exit cleanly
-# logger "$0 - Exited cleanly"
 exit 0
