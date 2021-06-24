@@ -1,0 +1,8 @@
+CREATE MATERIALIZED VIEW zeek_files_mv_sha1 
+  ENGINE SummingMergeTree() 
+  PARTITION BY toYYYYMMDD(day) 
+  ORDER BY (day, sha1) 
+  AS
+    SELECT day, sha1, count(day) as sha1_counts 
+    FROM zeek_files 
+    GROUP BY (day, sha1)
