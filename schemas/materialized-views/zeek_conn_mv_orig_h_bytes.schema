@@ -1,0 +1,8 @@
+CREATE MATERIALIZED VIEW zeek_conn_mv_orig_h_bytes 
+  ENGINE SummingMergeTree() 
+  PARTITION BY toYYYYMMDD(day) 
+  ORDER BY (day, orig_h) 
+  AS 
+    SELECT day, orig_h, sum(orig_ip_bytes) as orig_ip_bytes, sum(resp_ip_bytes) as resp_ip_bytes
+    FROM zeek_conn 
+    GROUP BY (day, orig_h)
