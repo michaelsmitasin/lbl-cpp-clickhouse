@@ -1,7 +1,5 @@
 CREATE TABLE zeek_smtp
 (
-        day Date,
-        file_src String,
         ts String,
         uid String,
         orig_h String, 
@@ -28,9 +26,11 @@ CREATE TABLE zeek_smtp
         user_agent String,
         tls Enum8('F'=0, 'T'=1, '-'=2),
         fuids String,
-        is_webmail Enum8('F'=0, 'T'=1, '-'=2)
+        is_webmail Enum8('F'=0, 'T'=1, '-'=2),
+        file_src String,
+        day Date MATERIALIZED toDate(toDateTime(round(toFloat64(ts)), 'America/Los_Angeles'))
 ) 
 ENGINE MergeTree()
 PARTITION BY toYYYYMMDD(day) 
-ORDER BY (day, mailfrom, rcptto) 
+ORDER BY (ts, sipHash64(mailfrom, rcptto)) 
 SETTINGS index_granularity=8192
